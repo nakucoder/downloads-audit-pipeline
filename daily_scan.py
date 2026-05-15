@@ -1,9 +1,11 @@
-import pathlib, datetime, pandas as pd, matplotlib, psycopg2, boto3, json, os
+import pathlib, datetime, pandas as pd, matplotlib, psycopg2, boto3, json, os, base64
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from dotenv import load_dotenv
-import base64
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
 load_dotenv(pathlib.Path(__file__).parent / '.env')
 
@@ -13,10 +15,12 @@ REPORT_DIR.mkdir(exist_ok=True)
 
 DB = dict(dbname='downloads_audit', user='juana', password=os.getenv('DB_PASSWORD'), host='localhost')
 SNS_ARN = os.getenv('SNS_ARN')
+FROM_EMAIL = 'juanakuspinelli@gmail.com'
+TO_EMAIL = 'juanakuspinelli@gmail.com'
 LOG_GROUP = '/downloads-audit'
 LOG_STREAM = f"run-{datetime.date.today()}"
 
-sns = boto3.client('sns', region_name='us-east-2')
+ses = boto3.client('ses', region_name='us-east-2')
 logs = boto3.client('logs', region_name='us-east-2')
 
 def safe_path(p):
@@ -73,19 +77,31 @@ def get_new_files(cur, today, df):
 def get_yesterday_summary(cur, today):
     yesterday = today - datetime.timedelta(days=1)
     cur.execute('SELECT total_files, total_size_mb FROM scans WHERE scan_date = %s', (yesterday,))
-    row = cur.fetchone()
-    return row if row else None
+    return cur.fetchone()
 
 def get_last_month_summary(cur, today):
     last_month = today.replace(day=1) - datetime.timedelta(days=1)
     first_of_last_month = last_month.replace(day=1)
     cur.execute('''
         SELECT AVG(total_files), AVG(total_size_mb)
-        FROM scans
-        WHERE scan_date >= %s AND scan_date <= %s
+        FROM scans WHERE scan_date >= %s AND scan_date <= %s
     ''', (first_of_last_month, last_month))
-    row = cur.fetchone()
-    return row if row else None
+    return cur.fetchone()
+
+def send_email(subject, body, image_path):
+    msg = MIMEMultipart()
+    msg['Subject'] = subject
+    msg['From'] = FROM_EMAIL
+    msg['To'] = TO_EMAIL
+    msg.attach(MIMEText(body, 'plain'))
+    with open(image_path, 'rb') as f:
+        img = MIMEImage(f.read(), name=image_path.name)
+        msg.attach(img)
+    ses.send_raw_email(
+        Source=FROM_EMAIL,
+        Destinations=[TO_EMAIL],
+        RawMessage={'Data': msg.as_string()}
+    )
 
 TODAY = datetime.date.today()
 records = []
@@ -152,49 +168,6 @@ if new_files:
 
 should_send = bool(notable_lines) or is_monthly
 
-if should_send:
-    if is_monthly:
-        subject = f"Downloads Monthly Report — {TODAY.strftime('%B %Y')}"
-    else:
-        subject = f"Downloads Alert — {TODAY}"
-
-    body = f"Downloads Audit — {TODAY}\n"
-    body += "=" * 50 + "\n"
-    body += f"Total files : {len(df)}\n"
-    body += f"Total size  : {df['size_mb'].sum()/1024:.2f} GB\n"
-
-    if yesterday_summary:
-        diff_files = len(df) - yesterday_summary[0]
-        diff_size = (df['size_mb'].sum() - yesterday_summary[1]) / 1024
-        body += f"vs yesterday: {diff_files:+d} files, {diff_size:+.2f} GB\n"
-
-    if is_monthly and last_month_summary and last_month_summary[0]:
-        body += f"\nLAST MONTH AVERAGE:\n"
-        body += f"  Avg files : {last_month_summary[0]:.0f}\n"
-        body += f"  Avg size  : {last_month_summary[1]/1024:.2f} GB\n"
-
-    if notable_lines:
-        body += "\nNOTABLE:\n"
-        body += "\n".join(notable_lines)
-    else:
-        body += "\nNo notable files."
-
-    sns.publish(TopicArn=SNS_ARN, Subject=subject, Message=body)
-    print('Alert sent.')
-else:
-    print('Nothing notable. No alert sent.')
-
-log_to_cloudwatch({
-    'date': str(TODAY),
-    'total_files': int(len(df)),
-    'total_size_gb': round(float(df['size_mb'].sum()) / 1024, 2),
-    'files_over_1gb': int(len(oversized)),
-    'files_over_365_days': int(len(ancient)),
-    'new_files': len(new_files),
-    'alert_sent': should_send
-})
-print('Logged to CloudWatch.')
-
 ext_counts = df['extension'].value_counts()
 threshold = max(1, int(len(df) * 0.02))
 small_exts = ext_counts[ext_counts <= threshold].index
@@ -247,3 +220,48 @@ report_path = REPORT_DIR / f'report_{TODAY}.png'
 plt.savefig(report_path, dpi=150, bbox_inches='tight')
 plt.close()
 print(f'Report saved: {report_path}')
+
+if should_send:
+    if is_monthly:
+        subject = f"Downloads Monthly Report — {TODAY.strftime('%B %Y')}"
+    else:
+        subject = f"Downloads Alert — {TODAY}"
+
+    body = f"Downloads Audit — {TODAY}\n"
+    body += "=" * 50 + "\n"
+    body += f"Total files : {len(df)}\n"
+    body += f"Total size  : {df['size_mb'].sum()/1024:.2f} GB\n"
+
+    if yesterday_summary:
+        diff_files = len(df) - yesterday_summary[0]
+        diff_size = (df['size_mb'].sum() - yesterday_summary[1]) / 1024
+        body += f"vs yesterday: {diff_files:+d} files, {diff_size:+.2f} GB\n"
+
+    if is_monthly and last_month_summary and last_month_summary[0]:
+        body += f"\nLAST MONTH AVERAGE:\n"
+        body += f"  Avg files : {last_month_summary[0]:.0f}\n"
+        body += f"  Avg size  : {last_month_summary[1]/1024:.2f} GB\n"
+
+    if notable_lines:
+        body += "\nNOTABLE:\n"
+        body += "\n".join(notable_lines)
+    else:
+        body += "\nNo notable files."
+
+    body += "\n\nSee attached chart for full visual report."
+
+    send_email(subject, body, report_path)
+    print('Email sent via SES.')
+else:
+    print('Nothing notable. No email sent.')
+
+log_to_cloudwatch({
+    'date': str(TODAY),
+    'total_files': int(len(df)),
+    'total_size_gb': round(float(df['size_mb'].sum()) / 1024, 2),
+    'files_over_1gb': int(len(oversized)),
+    'files_over_365_days': int(len(ancient)),
+    'new_files': len(new_files),
+    'alert_sent': should_send
+})
+print('Logged to CloudWatch.')
