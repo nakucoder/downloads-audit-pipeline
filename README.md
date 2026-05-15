@@ -43,6 +43,7 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 
 ## Project Structure
 
+\`\`\`
 downloads-audit-pipeline/
 ├── daily_scan.py           # Main script — scan, log, alert
 ├── downloads_audit.ipynb   # Interactive Jupyter report
@@ -50,6 +51,7 @@ downloads-audit-pipeline/
 ├── .env.example            # Credentials template
 ├── .gitignore
 └── reports/                # Daily PNG reports (not committed)
+\`\`\`
 
 
 ## How to run
