@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas matplotlib psycopg2-binary boto3 python-dotenv
+
+      - name: Check syntax
+        run: |
+          python -m py_compile daily_scan.py
+          python -m py_compile create_notebook.py
+          echo "No syntax errors found."
