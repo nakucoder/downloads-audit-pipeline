@@ -3,11 +3,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from dotenv import load_dotenv
+import base64
 
 load_dotenv(pathlib.Path(__file__).parent / '.env')
 
 DOWNLOADS_DIR = pathlib.Path('/mnt/c/Users/juana/Downloads').resolve()
-REPORT_DIR = pathlib.Path('/home/juana/miami-analysis/reports')
+REPORT_DIR = pathlib.Path('/home/juana/downloads-audit-pipeline/reports')
 REPORT_DIR.mkdir(exist_ok=True)
 
 DB = dict(dbname='downloads_audit', user='juana', password=os.getenv('DB_PASSWORD'), host='localhost')
@@ -62,6 +63,30 @@ def log_to_cloudwatch(message: dict):
         }]
     )
 
+def get_new_files(cur, today, df):
+    yesterday = today - datetime.timedelta(days=1)
+    cur.execute('SELECT filename FROM files WHERE scan_date = %s', (yesterday,))
+    previous = set(row[0] for row in cur.fetchall())
+    current = set(df['filename'].tolist())
+    return list(current - previous)
+
+def get_yesterday_summary(cur, today):
+    yesterday = today - datetime.timedelta(days=1)
+    cur.execute('SELECT total_files, total_size_mb FROM scans WHERE scan_date = %s', (yesterday,))
+    row = cur.fetchone()
+    return row if row else None
+
+def get_last_month_summary(cur, today):
+    last_month = today.replace(day=1) - datetime.timedelta(days=1)
+    first_of_last_month = last_month.replace(day=1)
+    cur.execute('''
+        SELECT AVG(total_files), AVG(total_size_mb)
+        FROM scans
+        WHERE scan_date >= %s AND scan_date <= %s
+    ''', (first_of_last_month, last_month))
+    row = cur.fetchone()
+    return row if row else None
+
 TODAY = datetime.date.today()
 records = []
 for entry in DOWNLOADS_DIR.iterdir():
@@ -83,6 +108,10 @@ df = pd.DataFrame(records)
 conn = psycopg2.connect(**DB)
 cur = conn.cursor()
 init_db(cur)
+
+new_files = get_new_files(cur, TODAY, df)
+yesterday_summary = get_yesterday_summary(cur, TODAY)
+last_month_summary = get_last_month_summary(cur, TODAY) if TODAY.day == 1 else None
 
 cur.execute('''
     INSERT INTO scans (scan_date, total_files, total_size_mb, files_over_1gb, files_over_365_days)
@@ -109,26 +138,51 @@ is_monthly = TODAY.day == 1
 
 notable_lines = []
 if not oversized.empty:
+    notable_lines.append("FILES OVER 1 GB:")
     for _, r in oversized.iterrows():
         notable_lines.append(f"  {r['size_mb']/1024:.2f} GB  |  {r['filename']}")
 if not ancient.empty:
+    notable_lines.append("FILES OLDER THAN 365 DAYS:")
     for _, r in ancient.iterrows():
-        notable_lines.append(f"  {r['age_days']} days old  |  {r['filename']}")
+        notable_lines.append(f"  {r['age_days']} days  |  {r['filename']}")
+if new_files:
+    notable_lines.append("NEW FILES:")
+    for f in sorted(new_files):
+        notable_lines.append(f"  {f}")
 
-if notable_lines or is_monthly:
-    subject = f"Downloads Audit — {TODAY}"
-    body = f"Downloads Audit Report — {TODAY}\n"
-    body += f"Total files: {len(df)}\n"
-    body += f"Total size: {df['size_mb'].sum()/1024:.2f} GB\n\n"
+should_send = bool(notable_lines) or is_monthly
+
+if should_send:
+    if is_monthly:
+        subject = f"Downloads Monthly Report — {TODAY.strftime('%B %Y')}"
+    else:
+        subject = f"Downloads Alert — {TODAY}"
+
+    body = f"Downloads Audit — {TODAY}\n"
+    body += "=" * 50 + "\n"
+    body += f"Total files : {len(df)}\n"
+    body += f"Total size  : {df['size_mb'].sum()/1024:.2f} GB\n"
+
+    if yesterday_summary:
+        diff_files = len(df) - yesterday_summary[0]
+        diff_size = (df['size_mb'].sum() - yesterday_summary[1]) / 1024
+        body += f"vs yesterday: {diff_files:+d} files, {diff_size:+.2f} GB\n"
+
+    if is_monthly and last_month_summary and last_month_summary[0]:
+        body += f"\nLAST MONTH AVERAGE:\n"
+        body += f"  Avg files : {last_month_summary[0]:.0f}\n"
+        body += f"  Avg size  : {last_month_summary[1]/1024:.2f} GB\n"
+
     if notable_lines:
-        body += "NOTABLE FILES:\n"
+        body += "\nNOTABLE:\n"
         body += "\n".join(notable_lines)
     else:
-        body += "No notable files today."
+        body += "\nNo notable files."
+
     sns.publish(TopicArn=SNS_ARN, Subject=subject, Message=body)
     print('Alert sent.')
 else:
-    print('No notable files. No alert sent.')
+    print('Nothing notable. No alert sent.')
 
 log_to_cloudwatch({
     'date': str(TODAY),
@@ -136,7 +190,8 @@ log_to_cloudwatch({
     'total_size_gb': round(float(df['size_mb'].sum()) / 1024, 2),
     'files_over_1gb': int(len(oversized)),
     'files_over_365_days': int(len(ancient)),
-    'alert_sent': bool(notable_lines or is_monthly)
+    'new_files': len(new_files),
+    'alert_sent': should_send
 })
 print('Logged to CloudWatch.')
 
