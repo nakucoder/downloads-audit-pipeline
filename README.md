@@ -22,7 +22,7 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 | AWS SNS | Email alerts for notable files |
 | AWS CloudWatch | Observability — logs every run |
 | Jupyter Notebook | Interactive visual report |
-| GitHub Actions | CI (coming soon) |
+| GitHub Actions | CI - syntax check on every push |
 
 ## Security
 
