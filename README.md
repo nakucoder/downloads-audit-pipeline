@@ -16,7 +16,7 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 ## Email triggers
 
 | Trigger | Frequency |
-|---------|-----------|
+|---------|----------|
 | New file downloaded | Daily (when it happens) |
 | File over 1 GB | Daily (when it happens) |
 | File older than 365 days | Daily (when it happens) |
@@ -43,7 +43,7 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 
 ## Project Structure
 
-\`\`\`
+```
 downloads-audit-pipeline/
 ├── daily_scan.py
 ├── downloads_audit.ipynb
@@ -51,7 +51,7 @@ downloads-audit-pipeline/
 ├── .env.example
 ├── .gitignore
 └── reports/
-\`\`\`
+```
 
 ## How to run
 
