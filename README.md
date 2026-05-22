@@ -4,7 +4,7 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 
 ## What it does
 
-- Scans the Downloads folder every day at 8am via cron
+- Scans the Downloads folder every day at 8am via Windows Task Scheduler
 - Collects filename, file type, size, date modified, and age for every file
 - Detects new files, files over 1GB, and files older than 365 days
 - Logs results to a local PostgreSQL database
@@ -17,9 +17,9 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 
 | Trigger | Frequency |
 |---------|----------|
-| New file downloaded | Daily (when it happens) |
-| File over 1 GB | Daily (when it happens) |
-| File older than 365 days | Daily (when it happens) |
+| New file downloaded | Daily (detected at 8am) |
+| File over 1 GB | Daily (detected at 8am) |
+| File older than 365 days | Daily (detected at 8am) |
 | Full monthly report | 1st of every month |
 
 ## Stack
@@ -27,12 +27,31 @@ Automated daily audit of a Windows Downloads folder from WSL — read-only, noth
 | Tool | Role |
 |------|------|
 | Python | Core scan script |
-| Cron (WSL) | Runs automatically every day at 8am |
+| Windows Task Scheduler | Runs automatically every day at 8am — no WSL terminal needed |
 | PostgreSQL (local) | Logs every file and scan summary |
 | AWS SES | Sends email with chart attached |
 | AWS CloudWatch | Logs every run |
 | Jupyter Notebook | Interactive visual report |
 | GitHub Actions | CI — syntax check on every push |
+
+## Scheduling
+
+The script runs via **Windows Task Scheduler** (not cron). This means:
+- No WSL terminal needs to be open
+- Runs automatically at 8am every day
+- If the PC was off or asleep at 8am, it runs as soon as the PC wakes up (`StartWhenAvailable`)
+
+To view or edit the task: open Task Scheduler → find "Downloads Audit Pipeline".
+
+To recreate the task (e.g. on a new machine), run this in PowerShell as your user:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu -- /usr/bin/python3 /home/juana/downloads-audit-pipeline/daily_scan.py"
+$trigger = New-ScheduledTaskTrigger -Daily -At "8:00AM"
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName "Downloads Audit Pipeline" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Daily downloads audit"
+```
 
 ## Security
 
@@ -53,11 +72,10 @@ downloads-audit-pipeline/
 └── reports/
 ```
 
-## How to run
+## How to run manually
 
 1. Copy `.env.example` to `.env` and fill in your credentials
-2. Run manually: `python3 daily_scan.py`
-3. Schedule with cron: `0 8 * * * /usr/bin/python3 /path/to/daily_scan.py`
+2. Run: `python3 /home/juana/downloads-audit-pipeline/daily_scan.py`
 
 ## Author
 
